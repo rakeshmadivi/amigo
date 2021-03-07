@@ -62,6 +62,8 @@ func uploadFile(w http.ResponseWriter, r *http.Request){
 
 func setStatus(w http.ResponseWriter, r *http.Request){
 	log.Print("setStatus")
+	log.Print("SRC-IP:",r.Header.Get("X-Forwarded-for"))
+	log.Print("SRC-IP:",r.RemoteAddr)
 }
 
 func getStatus(w http.ResponseWriter, r *http.Request){
