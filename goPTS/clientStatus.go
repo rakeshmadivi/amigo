@@ -4,7 +4,7 @@ import (
 	"fmt"
 	//"log"
 	//"time"
-	"strconv"
+	//"strconv"
 	//"bufio"
 	//"os"
 	//"strings"
@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	//"strings"
 	//"github.com/go-playground/validator"
+	"io"	// for wrting strings to ResponseWriter
 )
 
 type TEST struct{
@@ -28,6 +29,7 @@ type TEST struct{
 
 var wg sync.WaitGroup
 
+var lck sync.Mutex
 type MTX struct {
 	mtx sync.Mutex
 	cnt int
@@ -54,7 +56,7 @@ var Test TEST
 
 // Test Status
 type SYNC_STATUS struct {
-	groupSize, init, running, done int
+	groupSize, init, running, done, exit int
 	SYNC_STATE string
 }
 
@@ -88,7 +90,7 @@ type REPLY struct{
 	Reply REQ
 }
 
-var ClientStates = map[string]int{"INIT":0,"RUNNING":1,"DONE":2}
+var ClientStates = map[string]int{"INIT":0,"RUNNING":1,"DONE":2,"EXIT_ACK":3}
 
 func main(){
 
@@ -167,7 +169,7 @@ func postCall(w http.ResponseWriter, r *http.Request){	//TODO  Adjust the src ty
 			return
 		}
 
-		fmt.Printf("[FROM-CURL-CALL]: %+v\n", curl_req)
+		//fmt.Printf("[FROM-CURL-CALL]: %+v\n", curl_req)
 	}
 
 	LOCK()
@@ -189,13 +191,16 @@ func postCall(w http.ResponseWriter, r *http.Request){	//TODO  Adjust the src ty
 
 	sutInfo := SUT{src,curl_req}
 
-	fmt.Println("[SET-Request]",sutInfo)
+	fmt.Println("[REQUEST]",sutInfo)
 
+	lck.Lock()
 	cStatus, _ := setSUTstatus(sutInfo)
+	lck.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(&cStatus) //reply)
-	fmt.Println("cStatus:",cStatus)
+	//fmt.Println("[Updated STATUS]",cStatus)
+
 	UNLOCK()
 }
 
@@ -267,12 +272,11 @@ func getCall(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
-	fmt.Printf("RECEIVED: %+v\n", get.Testuid)
+	fmt.Printf("STATUS of: %+v\n", get.Testuid)
 
 	LOCK()
 
-	LockCount()
-
+	/*
 	if mutex.cnt != 0 {
 		msg := "CURRENT-LOCK-COUNT:" + strconv.Itoa(mutex.cnt) +"Exiting...."
 
@@ -280,45 +284,42 @@ func getCall(w http.ResponseWriter, r *http.Request){
 
 		return
 	}
+	*/
 
 	status := getStatus(get.Testuid)
 
+	/*
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(&status) //reply)
-	fmt.Println("Replied:", status)
+	*/
+
+	io.WriteString(w,status+"\n")
+
 	UNLOCK()
 }
 
-func setSUTstatus(sut SUT) (SYNC_STATUS,bool) { //, wg *sync.WaitGroup){
+func setSUTstatus(sut SUT) (string,bool) { //, wg *sync.WaitGroup){
 
 	src := sut.src
 	test := sut.test
 	uid := test.TestUID
 
-	fmt.Println("SUT MAP:")
-	for k,v := range sutMap {
-		fmt.Println("TestUID:",k,"Has",len(v),"Elements")
-	}
-
-	fmt.Println("SYNC STATUS:")
-	for k,v := range syncStatus {
-		fmt.Println("TestUID:",k,"STATUS:",*v)
-	}
+	// Print Entries
+	//PrintEntries()
 
 	if _,ok := sutMap[uid] ; !ok && len(sutMap) > MAX_UID {
 		fmt.Println("Exceeded Max Map Size..! Skipping Operation.")
-		return SYNC_STATUS{SYNC_STATE:"Exceeded MaxUIDs for New UID: "+uid},false
+		return "Exceeded MaxUIDs for New UID: "+uid,false
 	}
 
-	fmt.Println("[REQUEST]",sut)
+	//fmt.Println("[REQUEST]",sut)
 
 	// Check if valid state
 	_,valid_state := ClientStates[test.Status]
 	if !valid_state {
 		fmt.Println("Invalid Client State!")
 
-		//mutex.Unlock()
-		return SYNC_STATUS{SYNC_STATE:"INVALID STATE"},false
+		return "INVALID STATE",false
 	}
 
 	_,uid_in_sutMap := sutMap[uid]
@@ -329,18 +330,18 @@ func setSUTstatus(sut SUT) (SYNC_STATUS,bool) { //, wg *sync.WaitGroup){
 	if k, ok := sutMap[uid][src]; ok {
 		if  test.Status == k.test.Status {
 			msg := "[ "+src+"/"+test.TestUID+"/"+test.Status+" ] IP/TestUID/Status Already Present."
-			return SYNC_STATUS{SYNC_STATE:msg},true
+			return msg,true
 		}
 	}else{
-		fmt.Println("Adding New Request")
+		fmt.Println("[New SUT Entry]")
 	}
 
 	sutMap[uid][src] = &SUT{src,test}
-	fmt.Println("After Updating SUT[",uid,"][",src,"]:",sutMap[uid][src])
-
+	//fmt.Println("[ Updated SUT ]", uid,src,":",sutMap[uid][src])
+/*
 	k,uid_in_syncStatus := syncStatus[uid]
 	if !uid_in_syncStatus {
-		fmt.Println("No Staus for :",uid," Appending new status...")
+		fmt.Println("[New STATUS Entry] ",uid)
 
 		tmp := SYNC_STATUS{}
 
@@ -352,30 +353,29 @@ func setSUTstatus(sut SUT) (SYNC_STATUS,bool) { //, wg *sync.WaitGroup){
 			tmp.running = 1
 		}else if test.Status == "DONE" {
 			tmp.done = 1
+		}else if test.Status == "EXIT_ACK" {
+			tmp.exit = 1
 		}
+
 		tmp.SYNC_STATE = "WAIT"
 
 		syncStatus[uid] = &tmp
 
-
-		//return *SYNC_STATUS{}
-		//mutex.Unlock()
-		return *syncStatus[uid],true
+		return "Added New Status Entry for: "+uid,true
 	}else {
 
 		if test.Status == "INIT" &&  k.SYNC_STATE == "EXIT" {
-			msg := "Unexpected condition."
-			return SYNC_STATUS{SYNC_STATE:msg},false
+			return "Unexpected condition.",false
 		}
 
 		// UID Present in syncStatus
 		if test.GroupSize != k.groupSize {
 			fmt.Println("Group Size mismatch!")
-			return SYNC_STATUS{SYNC_STATE:"GroupSize for TestUID: "+uid+" Mismatched. Expected Size: " + strconv.Itoa(k.groupSize) },false
+			return "GroupSize for TestUID: "+uid+" Mismatched. Expected Size: " + strconv.Itoa(k.groupSize), false
 		}
 		if k.init > k.groupSize || k.running > k.groupSize || k.done > k.groupSize {
 			fmt.Println("[ ",k," ] Sync Status (init/running/done) Count > group Size !")
-			return SYNC_STATUS{SYNC_STATE:"Exceeded GroupSize"},false
+			return "Exceeded GroupSize", false
 		}
 
 
@@ -383,39 +383,146 @@ func setSUTstatus(sut SUT) (SYNC_STATUS,bool) { //, wg *sync.WaitGroup){
 			k.init += 1
 			if k.init == k.groupSize && k.running == 0 && k.done == 0 {
 				k.SYNC_STATE = "START"
+				//k.init = 0
 			}
 		}else if test.Status == "RUNNING" {
 			k.running += 1
 			k.init -= 1
 			if k.running == k.groupSize && k.init == 0 && k.done == 0 {
 				k.SYNC_STATE = "RUNNING"
+				//k.running = 0
 			}
 		}else if test.Status == "DONE" {
 			k.done += 1
 			k.running -= 1
 			if k.done == k.groupSize && k.running == 0 && k.init == 0 {
 				k.SYNC_STATE = "EXIT"
+				//k.done = 0
+			}
+		}else if test.Status == "EXIT_ACK" {
+			k.exit += 1
+			k.done -= 1
+			if k.exit == k.groupSize { //&& k.done == 0 && k.running == 0 && k.init == 0 {
+				// RESET SUT and STATUS entries
+
+				fmt.Println("Got EXIT_ACK from all: ",k)
+
+				k.SYNC_STATE = "WAIT"
+				k.init = 0
+				k.running = 0
+				k.done = 0
+				k.exit = 0
+
+				// Delete entry in SUT and STATUS
+				fmt.Println("Deleting entry of TestUID: "+uid)
+				delete(sutMap,uid)
+				delete(syncStatus,uid)
+
+				PrintEntries()
+				return "Deleted: "+uid, true
 			}
 		}
-		fmt.Println(syncStatus[uid])
-		return *syncStatus[uid],true
+		return "Updated Status Entry for: "+uid,true
 	}
+	*/
+	PrintEntries()
+	return "Updated SUT for TestUID: "+uid+src,true
 }
 
 func getStatus(uid string) string { //wg *sync.WaitGroup) string {
-
+/*
+	lck.Lock()
 	status, ok := syncStatus[uid]
 	if !ok {
 
 		msg := "No Status for TestUID:"+uid
 
-		fmt.Println("Existing Requests:", sutMap)
-		fmt.Println("Existing Statuses:", syncStatus)
+		PrintEntries()
 
 		return msg
 	}
 
-	log.Println("[ CURRENT STATE ] ", status.SYNC_STATE)
-	return status.SYNC_STATE
+	reply := status.SYNC_STATE
+	fmt.Println("[ REPLY for TestUID -",uid," ] ", reply)
+	lck.Unlock()
+	return reply
+	*/
+
+	return getReply(uid)
 }
 
+var next = "INIT"
+func getReply(uid string) string {
+	lck.Lock()
+	var sREPLY = "WAIT"
+	
+	init,running,done,exit := 0,0,0,0
+	
+	var g_size = 0
+
+	k,ok := sutMap[uid]
+	if ok {
+		for _,v := range k {
+
+			g_size = v.test.GroupSize
+
+			if v.test.Status == "INIT" {
+				init += 1
+			}else if v.test.Status == "RUNNING" {
+				running += 1
+			}else if v.test.Status == "DONE" {
+				done += 1
+			}else if v.test.Status == "EXIT_ACK" {
+				exit += 1
+			}
+		}
+
+		if init == g_size {
+			sREPLY = "START"
+			next = "RUNNING"
+		}
+		if running == g_size && init == 0 {
+			sREPLY = "RUNNING"
+			next = "DONE"
+		} 
+		if done == g_size && running == 0 {
+			sREPLY = "EXIT"
+			next = "EXIT_ACK"
+		}
+		if exit == g_size && done == 0 {
+			sREPLY = "WAIT"
+			next = "INIT"
+		}
+
+		fmt.Println("Current Status:",init,running,done,exit," /",g_size," Replying:",sREPLY)
+	}
+	lck.Unlock()
+	return sREPLY
+}
+
+func PrintEntries(){
+	// SUT Entries
+	if len(sutMap) == 0 {
+		fmt.Println("No SUT Entries Found!")
+	}else{
+		fmt.Println("[Current SUT Entries - Map[src] : SUT{src,REQ}]")
+		for _,v := range sutMap {
+			//fmt.Println(v)
+			for _,r := range v{
+				fmt.Println(r)
+			}
+		}
+
+	}
+/*
+	// STATUS Entries
+	if len(syncStatus) == 0 {
+		fmt.Println("No STATUS Entries Found!")
+	}else{
+		fmt.Println("[Current SUT Entries - TestUID : Status Entry]")
+		for k,v := range syncStatus {
+			fmt.Println(k,v)
+		}
+	}
+	*/
+}

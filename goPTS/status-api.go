@@ -18,7 +18,7 @@ func (r RWMap) Get(key string) int {
 }
 
 // Set is a wrapper for setting the value of a key in the underlying map
-func (r RWMap) Set(key string, val int) {
+func (r RWMap) Set(key string, val *SYNC_STATUS) {
 	r.Lock()
 	defer r.Unlock()
 	r.stat[key] = val
@@ -26,8 +26,10 @@ func (r RWMap) Set(key string, val int) {
 
 var statMap = RWMap{stat: make(map[string]*SYNC_STATUS)}
 
-func UpdateSyncStatus(){
+func UpdateSyncStatus(uid string, val *SYNC_STATUS){
+	statMap.Set(uid,val)
 }
 
-func ReadSyncStatus(){
+func ReadSyncStatus(uid string){
+	statMap.Get(uid)
 }
