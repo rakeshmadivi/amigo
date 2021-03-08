@@ -38,8 +38,8 @@ type RWMap struct {
 	m map[string]int
 
 	// Counters
-	counters map[string]*COUNTER
-	sutMap map[string]map[string]*SUT
+	counters map[string]*COUNTER	// TestUIDs as keys
+	sutMap map[string]map[string]*SUT	// TestUIDs as for outer Map and SourceIP for Inner Map as Keys
 }
 
 // Get is a wrapper for getting the value from the underlying map
@@ -69,17 +69,37 @@ func (r RWMap) Inc(key string) {
 var c = RWMap{ m: map[string]int{"k1":0}, counters:make(map[string]*COUNTER) , sutMap : make(map[string]map[string]*SUT) }
 
 var wg sync.WaitGroup
-var enable_WG bool = true
+var enable_WG bool = false //true
+
+func Reset(tid string)string{
+	c.Lock()
+	fmt.Println("Resetting Entries for TestUID:",tid)
+	msg := "RESET COULD NOT PERFORM on " + tid
+	if _,ok := c.sutMap[tid]; ok {
+		delete(c.sutMap,tid)
+		delete(c.counters,tid)
+
+		_,ok1 := c.sutMap[tid]
+		_,ok2 := c.counters[tid]
+
+		if  !ok1 && !ok2 {
+			msg = "SUCCECCFULLY RESET:" + tid
+		}
+	}
+
+	c.Unlock()
+	return msg
+}
 
 func Read(tid string) string {// tid string){
-	fmt.Println("Reading Value...")
+	//fmt.Println("Reading Value...")
 	// Get a Read Lock
 	c.RLock()
+	/*
 	_,ok := c.m["k1"]
 	if !ok {fmt.Println("No key found.")}
 	
 	//fmt.Println("TID:"', tid, "Status:",c.counters[tid].state)
-	/*
 	fmt.Println("Counter:")
 	for k,v := range c.counters {
 		fmt.Println(k,v)
@@ -89,12 +109,12 @@ func Read(tid string) string {// tid string){
 
 	status := ""
 	if !ok {
-		status = "UNKNOWN"
+		status = "WAIT"
 	}else{
 		status = val.state
 	}
 
-	fmt.Println("[tid -",tid,"] REPLY:",status)
+	fmt.Println("\n[tid -",tid,"] REPLY:",status)
 	c.RUnlock()
 	return status
 }
@@ -102,19 +122,20 @@ func Read(tid string) string {// tid string){
 func Write(req REQ){
 	// Get a write Lock
 	c.Lock()
-	c.m["k1"]++
-	fmt.Println("Written:", c.m["k1"])
+	//c.m["k1"]++
+	//fmt.Println("Written:", c.m["k1"])
 
 	//tmp_str := strconv.Itoa(uid)
 	tid := req.TestUID //"00-01" //tmp_str
 	src := req.MyIP //"1.2.3."+tmp_str
 	
-	if _,ok := c.sutMap[tid][src]; !ok {
+	if _,ok := c.sutMap[tid]; !ok {
 		c.sutMap[tid] = make(map[string]*SUT)
 	}
 	c.sutMap[tid][src] = &SUT{src,req} //REQ{"Normal",3,tid,"Test","Args","INIT",src}}
+	fmt.Println("SUT Entries Size:",len(c.sutMap[tid]))
 
-
+/*
 	// Increment values accordingly
 	status := c.sutMap[tid][src].test.Status
 
@@ -172,9 +193,9 @@ func Write(req REQ){
 	}else{
 		c.counters[tid].state = "WAIT"
 	}
+*/
 
-
-	fmt.Println("Written:", c.counters[tid],c.sutMap[tid][src])
+	fmt.Println("[SUT Entres]:",c.sutMap[tid])
 	c.Unlock()
 
 	if enable_WG {
@@ -182,6 +203,70 @@ func Write(req REQ){
 	}
 }
 
+func periodicStatusUpdate(){
+	for {
+		c.Lock()
+
+		funcName :="[ UPDATER ]"
+		fmt.Println(funcName,"sutMap Size:",len(c.sutMap),"Counter Size:",len(c.counters))
+
+		for tid,v := range c.sutMap {
+
+			fmt.Println(funcName,"TID:",tid,"Contains:",len(v))
+
+			i_cnt,r_cnt,d_cnt,e_cnt := 0,0,0,0	//,"WAIT"
+			gsize := 0
+			for src,details := range v {
+				fmt.Println(funcName,"SUT[",src,"] ",*details )
+				status := details.test.Status
+				gsize = details.test.GroupSize
+
+				if status == "INIT" {
+					i_cnt++
+
+				}else if status == "RUNNING" {
+					r_cnt++
+
+				}else if status == "DONE" {
+					d_cnt++
+
+				}else if status == "EXIT_ACK" {
+					e_cnt++
+				}
+			}
+
+			fmt.Println(funcName,"TestID:",tid,"Counters: i,r,d,e = ",i_cnt,r_cnt,d_cnt,e_cnt)
+
+			if _,ok := c.counters[tid]; !ok {
+				c.counters[tid] = &COUNTER{}
+			}
+
+			// Update Count Values
+			c.counters[tid].init = i_cnt
+			c.counters[tid].running = r_cnt
+			c.counters[tid].done = d_cnt
+			c.counters[tid].exit = e_cnt
+
+			if i_cnt == gsize {
+				c.counters[tid].state = "START"
+
+			}else if r_cnt == gsize {
+				c.counters[tid].state = "RUNNING"
+
+			}else if d_cnt == gsize {
+				c.counters[tid].state = "EXIT"
+
+			}else if e_cnt == gsize {
+				c.counters[tid].state = "WAIT"
+			}else{
+				c.counters[tid].state = "WAIT"
+			}
+			fmt.Println("[UPDATED]:",c.counters[tid])
+		}
+		c.Unlock()
+		time.Sleep(3*time.Second)
+	}
+}
 
 func simulate(){
 	states := []string{"INIT","RUNNING","DONE","EXIT_ACK"}
@@ -262,9 +347,35 @@ func ReadStatus(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
-	//fmt.Printf("STATUS of: %+v\n", get.Testuid)
-	fmt.Println("Calling Read for http GET")
 	reply := Read(get.Testuid)
+	io.WriteString(w, reply+"\n")
+}
+
+func ResetStatus(w http.ResponseWriter, r *http.Request){
+	type cget struct { 
+		Testuid string `json:testuid`
+	}
+
+	get := cget{}
+
+	// CHECK if JSON data is sent by Client
+	if r.Header.Get("Content-Type") != "application/json" {
+		msg := "Invalid Content Type! Only application/json content is accepted."
+		log.Print(msg)
+		http.Error(w,msg,http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Parse POSTed JSON into REQ
+
+	err := json.NewDecoder(r.Body).Decode(&get)
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	reply := Reset(get.Testuid)
 	io.WriteString(w, reply+"\n")
 }
 
@@ -272,6 +383,7 @@ func setupRoutes(){
 
 	http.HandleFunc("/setStatus", WriteStatus)
 	http.HandleFunc("/getStatus", ReadStatus)
+	http.HandleFunc("/reset", ResetStatus)
 
 	port := "8300"
 
@@ -291,5 +403,6 @@ func main() {
 	// above would need to be written as 
 	//c.Inc("some_key")
 	//simulate()
+	go periodicStatusUpdate()
 	setupRoutes()
 }

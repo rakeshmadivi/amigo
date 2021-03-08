@@ -27,7 +27,7 @@ SET(){
 		exit
 	fi
 
-	echo -n "[ $$ ] SET : $myip $uid $tstatus => "
+	echo -n "[ $$ ] SET : $myip $uid $tstatus |"
 	
 	curl -s -H 'Content-Type: application/json' -d '{"testtype":"'$testtype'","groupsize":'$grpSize',"testuid":"'$uid'","test":"TEST-'$rand'","args":"ARGS-'$rand'","status":"'$tstatus'","myip":"'$myip'"}' http://localhost:8300/setStatus
 }
@@ -56,7 +56,7 @@ waitForSync(){
 	[ $# -ne 2 ] && echo "Required UID to proceed.!" && exit
 	
 	uid=$1
-	sync_for=START
+	sync_for=$2
 
 	SYNC_STATE=""
 
@@ -66,6 +66,7 @@ waitForSync(){
 	do
 		sleep 2
 		SYNC_STATE=$(GET $uid)
+		
 		echo Synching for $sync_for...
 		
 		if [[ $((SECONDS-st)) -eq 120 ]]
@@ -73,9 +74,16 @@ waitForSync(){
 			echo Reached wait Timeout. Exiting wait loop.
 			break
 		fi
+
+		# TODO Do we have to send SET request Everytime?
 	done
 
-	if [ "$SYNC_STATE" == "$sync_for" ]
+	if [ "$SYNC_STATE" == "UNKNOWN" ]
+	then
+		echo Got: UNKNOWN, Requires Resend.
+		return 2
+
+	elif [ "$SYNC_STATE" == "$sync_for" ] 
 	then
 		echo "[SUT] Received: $SYNC_STATE" && return 0
 	else
@@ -96,22 +104,26 @@ simulate_pts_tp(){
 	SET $@ > cur-set.log
 
 	waitForSync $uid START
+	retCode=$?
 
-	if [ $? == 0 ]
+	if [ $retCode == 0 ]
 	then
-	
-			SET $ip $uid RUNNING
-			
-			echo  "[$(date +%H:%M:%S)] $MSG : STARTing My test."
-			sleep $((RANDOM%7))
 
-			SET $ip $uid DONE
+		SET $ip $uid RUNNING
 
-			waitForSync $uid EXIT
+		echo  "[$(date +%H:%M:%S)] $MSG : STARTing My test."
+		sleep $((RANDOM%7))
+
+		SET $ip $uid DONE
+
+		waitForSync $uid EXIT
+		SET $ip $uid EXIT_ACK
+		exit
 	fi
 }
 
 for i in $(seq 1 3)
 do
-	simulate_pts_tp 1.2.3.$i 1 INIT > sim-$i.log 2>&1 &
+	tid=1	 # $((RANDOM%4)) 
+	simulate_pts_tp 1.2.3.$i $tid INIT > sim-$i.log 2>&1 &
 done
